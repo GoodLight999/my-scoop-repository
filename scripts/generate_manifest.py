@@ -138,7 +138,9 @@ def main() -> int:
             path = BUCKET_DIR / f"{name}.json"
             keep.add(path.name)
             previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
-            if previous:
+            if previous is not None:
+                if not isinstance(previous, dict):
+                    raise ValueError(f"Invalid manifest object: {path.name}")
                 source = previous.get("description", "")
                 if source.casefold() != f"Auto-managed: {repo_path}".casefold():
                     raise ValueError(f"Refusing to overwrite a manifest from another source: {path.name}")
@@ -156,7 +158,7 @@ def main() -> int:
                 if path.name in keep:
                     continue
                 current = json.loads(path.read_text(encoding="utf-8"))
-                if current.get("description", "").startswith("Auto-managed: "):
+                if isinstance(current, dict) and current.get("description", "").startswith("Auto-managed: "):
                     deletions.append(path)
 
         BUCKET_DIR.mkdir(parents=True, exist_ok=True)
