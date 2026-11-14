@@ -12,12 +12,16 @@ from pathlib import Path
 
 BUCKET_DIR = Path(__file__).resolve().parent.parent / "bucket"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-REPO_URL = re.compile(r"^https://github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", re.I)
+REPO_URL = re.compile(r"^https://github\.com/([a-z0-9_.-]+)/([a-z0-9_.-]+?)(?:\.git)?/?$", re.I)
 REJECTED_PLATFORM = re.compile(
     r"(?:^|[._-])(?:linux|macos|darwin|osx|mac|android|ios|arm64|aarch64)(?:[._-]|$)", re.I
 )
-INSTALLER = re.compile(r"(?:^|[._-])(?:setup|install|installer)(?:[._-]|$)", re.I)
+INSTALLER = re.compile(r"(?:^|[._\s-])(?:setup|install(?:er|ation|ing)?|update(?:r)?)(?:[._\s-]|$)", re.I)
 SUPPORTED = {".zip": 30, ".7z": 25, ".exe": 15}
+RELEASE_NOISE = re.compile(r"(?:^|[._\s-])(?:group.?policy|sdk|symbols?|debug|source|sources|checksums?|sbom|binaries)(?:[._\s-]|$)", re.I)
+WINDOWS_HINT = re.compile(r"(?:^|[._\s-])(?:windows|win|win32|win64)(?:[._\s-]|$)", re.I)
+X64_HINT = re.compile(r"(?:^|[._\s-])(?:x64|x86_64|amd64)(?:[._\s-]|$)", re.I)
+PORTABLE_HINT = re.compile(r"(?:^|[._\s-])portable(?:[._\s-]|$)", re.I)
 HASH_RE = re.compile(r"^(?:sha256:)?([0-9a-f]{64})$", re.I)
 
 
@@ -26,6 +30,8 @@ def parse_repo(url: str) -> tuple[str, str]:
     if not match:
         raise ValueError(f"Invalid GitHub repository URL: {url}")
     owner, name = match.groups()
+    if owner in {".", ".."} or name in {".", ".."} or re.fullmatch(r"(?:con|prn|aux|nul|com[1-9]|lpt[1-9])", name, re.I):
+        raise ValueError(f"Unsupported repository name for Windows: {name}")
     return f"{owner}/{name}", name.lower()
 
 
@@ -56,24 +62,34 @@ def sha256_of_url(url: str) -> str:
 
 
 def score_asset(name: str) -> int:
+    if not isinstance(name, str):
+        return -1
     lower = name.lower()
     extension = next((ext for ext in SUPPORTED if lower.endswith(ext)), None)
-    if not extension or REJECTED_PLATFORM.search(lower) or INSTALLER.search(lower):
+    if not extension or REJECTED_PLATFORM.search(lower) or INSTALLER.search(lower) or RELEASE_NOISE.search(lower):
         return -1
-    if any(term in lower for term in (".sha256", ".sha512", "symbols", "debug", "source")):
+    win, x64, portable = bool(WINDOWS_HINT.search(lower)), bool(X64_HINT.search(lower)), bool(PORTABLE_HINT.search(lower))
+    # Unmarked archives are often source or ancillary files. A generic EXE is
+    # frequently a self-extracting installer, not a portable application.
+    if extension == ".exe" and not portable:
+        return -1
+    if not (win or x64 or portable):
         return -1
     score = SUPPORTED[extension]
-    if re.search(r"(?:^|[._-])(?:windows|win|win32|win64)(?:[._-]|$)", lower):
+    if win:
         score += 40
-    if re.search(r"(?:^|[._-])(?:x64|x86_64|amd64)(?:[._-]|$)", lower):
+    if x64:
         score += 10
-    if re.search(r"(?:^|[._-])portable(?:[._-]|$)", lower):
+    if portable:
         score += 5
     return score
 
 
 def pick_best_asset(assets: list[dict]) -> dict | None:
-    candidates = [asset for asset in assets if score_asset(asset.get("name", "")) >= 0]
+    candidates = [asset for asset in assets if isinstance(asset, dict)
+                  and isinstance(asset.get("browser_download_url"), str)
+                  and asset["browser_download_url"].startswith("https://")
+                  and score_asset(asset.get("name", "")) >= 0]
     return max(candidates, key=lambda asset: score_asset(asset["name"]), default=None)
 
 
@@ -85,10 +101,15 @@ def sha256_from_metadata(asset: dict) -> str | None:
 
 def build_manifest(repo_path: str, previous: dict | None = None) -> dict | None:
     release = api_request(f"https://api.github.com/repos/{repo_path}/releases/latest")
+    if release is not None and not isinstance(release, dict):
+        raise RuntimeError(f"Unexpected GitHub release response: {repo_path}")
     if not release or not release.get("tag_name"):
         print(f"[SKIP] No latest release: {repo_path}")
         return None
-    asset = pick_best_asset(release.get("assets") or [])
+    assets = release.get("assets") or []
+    if not isinstance(assets, list):
+        raise RuntimeError(f"Invalid release assets: {repo_path}")
+    asset = pick_best_asset(assets)
     if not asset or not asset.get("browser_download_url"):
         print(f"[SKIP] No supported Windows asset: {repo_path}")
         return None
@@ -142,7 +163,7 @@ def main() -> int:
                 if not isinstance(previous, dict):
                     raise ValueError(f"Invalid manifest object: {path.name}")
                 source = previous.get("description", "")
-                if source.casefold() != f"Auto-managed: {repo_path}".casefold():
+                if not isinstance(source, str) or source.casefold() != f"Auto-managed: {repo_path}".casefold():
                     raise ValueError(f"Refusing to overwrite a manifest from another source: {path.name}")
             manifest = build_manifest(repo_path, previous)
             if manifest is None:
@@ -158,7 +179,7 @@ def main() -> int:
                 if path.name in keep:
                     continue
                 current = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(current, dict) and current.get("description", "").startswith("Auto-managed: "):
+                if isinstance(current, dict) and isinstance(current.get("description"), str) and current["description"].startswith("Auto-managed: "):
                     deletions.append(path)
 
         BUCKET_DIR.mkdir(parents=True, exist_ok=True)
