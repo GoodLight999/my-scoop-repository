@@ -274,3 +274,27 @@ class AuditTests(unittest.TestCase):
         with patch.dict(os.environ, {"MANAGED_REPOS": ""}), self.assertRaises(SystemExit) as end:
             runpy.run_path(str(SCRIPT), run_name="__main__")
         self.assertEqual(end.exception.code, 0)
+
+    def test_invalid_release_versions_are_rejected(self):
+        for tag in ["v1.0/../../evil", "v1.0\\evil", "hello world", "v1.0\nsecond", "$HOME", "v1.0?x=1"]:
+            with self.subTest(tag=tag), patch.object(app, "api_request", return_value={
+                "tag_name": tag,
+                "assets": [dict(asset("tool-win-x64.zip"), digest="sha256:" + "f" * 64)],
+            }):
+                with self.assertRaises(ValueError):
+                    app.build_manifest("test/tool")
+
+    def test_numeric_release_tag_is_rejected(self):
+        with patch.object(app, "api_request", return_value={
+            "tag_name": 123,
+            "assets": [dict(asset("tool-win-x64.zip"), digest="sha256:" + "f" * 64)],
+        }):
+            with self.assertRaises(ValueError):
+                app.build_manifest("test/tool")
+
+    def test_release_version_with_suffix_is_accepted(self):
+        with patch.object(app, "api_request", return_value={
+            "tag_name": "v1.2.3-rc.1+build",
+            "assets": [dict(asset("tool-win-x64.zip"), digest="sha256:" + "f" * 64)],
+        }):
+            self.assertEqual(app.build_manifest("test/tool")["version"], "1.2.3-rc.1+build")
