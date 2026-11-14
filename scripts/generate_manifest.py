@@ -114,7 +114,12 @@ def build_manifest(repo_path: str, previous: dict | None = None) -> dict | None:
         print(f"[SKIP] No supported Windows asset: {repo_path}")
         return None
 
-    version = re.sub(r"^[vV](?=\d)", "", release["tag_name"])
+    tag = release["tag_name"]
+    if not isinstance(tag, str):
+        raise ValueError(f"Invalid release tag: {repo_path}")
+    version = re.sub(r"^[vV](?=\d)", "", tag)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", version):
+        raise ValueError(f"Unsupported release version: {repo_path}: {version!r}")
     url = asset["browser_download_url"]
     digest = sha256_from_metadata(asset)
     unchanged = previous and previous.get("version") == version and previous.get("url") == url
