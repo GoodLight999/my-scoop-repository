@@ -100,6 +100,14 @@ class ManifestTests(unittest.TestCase):
             self.assertTrue(manual.exists())
             self.assertTrue((Path(directory) / "tool.json").exists())
 
+    def test_manual_empty_manifest_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(module, "BUCKET_DIR", Path(directory)):
+            manual = Path(directory) / "tool.json"
+            manual.write_text("{}")
+            with patch.dict(os.environ, {"MANAGED_REPOS": "https://github.com/test/tool"}):
+                self.assertEqual(module.main(), 1)
+            self.assertEqual(manual.read_text(), "{}")
+
     def test_duplicate_repository_names_abort_without_changes(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(module, "BUCKET_DIR", Path(directory)):
             with patch.dict(os.environ, {
