@@ -186,3 +186,91 @@ class AuditTests(unittest.TestCase):
         self.assertTrue(manifest["url"].startswith("https://"))
         self.assertNotIn("autoupdate", manifest)
         self.assertNotIn("extract_dir", manifest)
+
+    def test_github_api_success_uses_auth_token(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, *args):
+                return b'{"tag_name":"v1"}'
+
+        with patch.object(app, "GITHUB_TOKEN", "test-token"), patch.object(
+            app.urllib.request, "urlopen", return_value=Response(),
+        ) as open_url:
+            result = app.api_request("https://api.github.com/repos/test/tool/releases/latest")
+        self.assertEqual(result["tag_name"], "v1")
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+
+    def test_api_network_error_and_invalid_json(self):
+        with patch.object(app.urllib.request, "urlopen", side_effect=OSError("network failure")):
+            with self.assertRaises(RuntimeError):
+                app.api_request("https://api.github.com/fail")
+
+        class MalformedResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, *args):
+                return b"{{bad"
+
+        with patch.object(app.urllib.request, "urlopen", return_value=MalformedResponse()):
+            with self.assertRaises(RuntimeError):
+                app.api_request("https://api.github.com/fail")
+
+    def test_streamed_hash_download(self):
+        import hashlib
+        content = b"abcdef" * 100000
+
+        class Response:
+            def __init__(self):
+                self.buffer = io.BytesIO(content)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, size):
+                return self.buffer.read(size)
+
+        with patch.object(app.urllib.request, "urlopen", return_value=Response()):
+            value = app.sha256_of_url("https://example.com/app.zip")
+        self.assertEqual(value, hashlib.sha256(content).hexdigest())
+
+    def test_asset_download_failure(self):
+        with patch.object(app.urllib.request, "urlopen", side_effect=OSError("timeout")):
+            with self.assertRaises(RuntimeError):
+                app.sha256_of_url("https://example.com/app.zip")
+
+    def test_malformed_manifest_array_is_preserved(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(app, "BUCKET_DIR", Path(temp)):
+            file = Path(temp) / "tool.json"
+            file.write_text("[]")
+            with patch.dict(os.environ, {"MANAGED_REPOS": "https://github.com/test/tool"}):
+                self.assertEqual(app.main(), 1)
+            self.assertEqual(file.read_text(), "[]")
+
+    def test_missing_release_preserves_managed_manifest(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(app, "BUCKET_DIR", Path(temp)):
+            file = Path(temp) / "tool.json"
+            file.write_text(json.dumps({"description": "Auto-managed: test/tool"}))
+            with patch.dict(os.environ, {"MANAGED_REPOS": "https://github.com/test/tool"}), patch.object(
+                app, "api_request", return_value=None,
+            ):
+                self.assertEqual(app.main(), 0)
+            self.assertTrue(file.exists())
+
+    def test_cli_entrypoint(self):
+        import runpy
+        with patch.dict(os.environ, {"MANAGED_REPOS": ""}), self.assertRaises(SystemExit) as end:
+            runpy.run_path(str(SCRIPT), run_name="__main__")
+        self.assertEqual(end.exception.code, 0)
