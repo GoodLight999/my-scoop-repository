@@ -30,6 +30,7 @@ class ManifestTests(unittest.TestCase):
             {"name": "tool-win-x64-setup.exe"},
             {"name": "tool-macos.zip"},
         ]
+        assets = [dict(item, browser_download_url=f"https://example.com/{item['name']}") for item in assets]
         self.assertEqual(module.pick_best_asset(assets)["name"], "tool-win-x64.zip")
         self.assertEqual(module.score_asset("tool-setup.exe"), -1)
         self.assertEqual(module.score_asset("tool-arm64.zip"), -1)
